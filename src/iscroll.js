@@ -8,7 +8,7 @@
  * Released under MIT license
  * http://cubiq.org/dropbox/mit-license.txt
  * 
- * Last updated: 2011.03.08
+ * Last updated: 2011.03.10
  * 
  * Modified by Aseem Kishore in order to improve zooming:
  * https://github.com/aseemk/iscroll
@@ -190,19 +190,25 @@ iScroll.prototype = {
 			that[dir + 'ScrollbarWrapper'].appendChild(bar);
 			that[dir + 'ScrollbarIndicator'] = bar;
 		}
-
-		if (dir == 'h') {
-			that.hScrollbarSize = that.hScrollbarWrapper.clientWidth;
-			that.hScrollbarIndicatorSize = m.max(m.round(that.hScrollbarSize * that.hScrollbarSize / that.scrollerW), 8);
-			that.hScrollbarIndicator.style.width = that.hScrollbarIndicatorSize + 'px';
-			that.hScrollbarMaxScroll = that.hScrollbarSize - that.hScrollbarIndicatorSize;
-			that.hScrollbarProp = that.hScrollbarMaxScroll / that.maxScrollX;
-		} else {
-			that.vScrollbarSize = that.vScrollbarWrapper.clientHeight;
-			that.vScrollbarIndicatorSize = m.max(m.round(that.vScrollbarSize * that.vScrollbarSize / that.scrollerH), 8);
-			that.vScrollbarIndicator.style.height = that.vScrollbarIndicatorSize + 'px';
-			that.vScrollbarMaxScroll = that.vScrollbarSize - that.vScrollbarIndicatorSize;
-			that.vScrollbarProp = that.vScrollbarMaxScroll / that.maxScrollY;
+		
+		// TEMP HACK try-catching this to prevent errors from propagating up
+		try {
+			if (dir == 'h') {
+				that.hScrollbarSize = that.hScrollbarWrapper.clientWidth;
+				that.hScrollbarIndicatorSize = m.max(m.round(that.hScrollbarSize * that.hScrollbarSize / that.scrollerW), 8);
+				// TODO BUG the following line throws an error sometimes because hScrollarIndicator is null:
+				that.hScrollbarIndicator.style.width = that.hScrollbarIndicatorSize + 'px';
+				that.hScrollbarMaxScroll = that.hScrollbarSize - that.hScrollbarIndicatorSize;
+				that.hScrollbarProp = that.hScrollbarMaxScroll / that.maxScrollX;
+			} else {
+				that.vScrollbarSize = that.vScrollbarWrapper.clientHeight;
+				that.vScrollbarIndicatorSize = m.max(m.round(that.vScrollbarSize * that.vScrollbarSize / that.scrollerH), 8);
+				that.vScrollbarIndicator.style.height = that.vScrollbarIndicatorSize + 'px';
+				that.vScrollbarMaxScroll = that.vScrollbarSize - that.vScrollbarIndicatorSize;
+				that.vScrollbarProp = that.vScrollbarMaxScroll / that.maxScrollY;
+			}
+		} catch (e) {
+			console.warn(e);
 		}
 
 		// Reset position
@@ -348,15 +354,13 @@ iScroll.prototype = {
 		
 		that.startTime = e.timeStamp;
 
-		if (that.options.onScrollStart) that.options.onScrollStart.call(that);
-
 		// Registering/unregistering of events is done to preserve resources on Android
-		setTimeout(function () {
+//		setTimeout(function () {
 //			that._unbind(START_EV);
 			that._bind(MOVE_EV);
 			that._bind(END_EV);
 			that._bind(CANCEL_EV);
-		}, 0);
+//		}, 0);
 	},
 	
 	_move: function (e) {
@@ -422,7 +426,11 @@ iScroll.prototype = {
 			}
 		}
 		
-		that.moved = true;
+		if (!that.moved) {
+			if (that.options.onScrollStart) that.options.onScrollStart.call(that);
+			that.moved = true;
+		}
+		
 		that._pos(newX, newY);
 		that.dirX = deltaX > 0 ? -1 : deltaX < 0 ? 1 : 0;
 		that.dirY = deltaY > 0 ? -1 : deltaY < 0 ? 1 : 0;
@@ -579,7 +587,7 @@ iScroll.prototype = {
 			}
 
 			if (that.zoomed) {
-				if (that.options.onZoomEnd) that.options.onZoomEnd.call(that);			// Execute custom code on scroll end
+				if (that.options.onZoomEnd) that.options.onZoomEnd.call(that);			// Execute custom code on zoom end
 				that.zoomed = false;
 			}
 
@@ -669,8 +677,6 @@ iScroll.prototype = {
 
 		that._transitionTime(0);
 		that.lastScale = 1;
-		
-		if (that.options.onZoomStart) that.options.onZoomStart.call(that);
 
 		that._unbind('gesturestart');
 		that._bind('gesturechange');
@@ -683,7 +689,10 @@ iScroll.prototype = {
 			scale = that.scale * e.scale,
 			x, y, relScale;
 
-		that.zoomed = true;
+		if (!that.zoomed) {
+			if (that.options.onZoomStart) that.options.onZoomStart.call(that);
+			that.zoomed = true;
+		}
 
 		// don't clamp zoom *during* a pinch. to clamp, uncomment this:
 		//if (scale < that.options.zoomMin) scale = that.options.zoomMin;
@@ -722,12 +731,16 @@ iScroll.prototype = {
 	
 	_wheel: function (e) {
 		var that = this,
-			deltaScale = that.scale * (1 + e.wheelDelta / 1080),
+			deltaScale,
 			deltaX = that.x + e.wheelDeltaX / 12,
 			deltaY = that.y + e.wheelDeltaY / 12;
 		
 		// TEMP aseemk: adding mousewheel zoom support
 		if (that.options.zoomWheel) {
+			
+			// this means three zooms change your scale by 2x, e.g. 6 zoom-ins go from 1x to 4x
+			deltaScale = that.scale * (Math.pow(2, 1/3 * (
+				e.wheelDelta ? e.wheelDelta / Math.abs(e.wheelDelta) : 0)));
 			
 			if (deltaScale < that.options.zoomMin) deltaScale = that.options.zoomMin;
 			if (deltaScale > that.options.zoomMax) deltaScale = that.options.zoomMax;
@@ -850,6 +863,8 @@ iScroll.prototype = {
 	 */
 	destroy: function () {
 		var that = this;
+
+		if (that.options.checkDOMChange) clearTimeout(that.DOMChangeInterval);
 
 		// Remove pull to refresh
 		if (that.pullDownToRefresh) {
@@ -983,10 +998,7 @@ iScroll.prototype = {
 			that.scrollTo(0, oldHeight, 0);
 		}
 		
-		// TEMP aseemk: passing a transition time because refresh() is called on zoom end,
-		// and it effectively resets the transform to within the min/max zoom constraints,
-		// so now this reset/clamp is done smoothly instead of in one jerk.
-		that._resetPos(200);
+		that._resetPos();
 	},
 
 	scrollTo: function (x, y, time, relative) {
@@ -1060,15 +1072,16 @@ iScroll.prototype = {
 
 		that.scale = scale;
 
-		if (that.options.onZoomStart) that.options.onZoomStart.call(that);
-
 		that.refresh();
 
 		that._bind('webkitTransitionEnd');
 		that._transitionTime(200);
 
 		setTimeout(function () {
-			that.zoomed = true;
+			if (!that.zoomed) {
+				if (that.options.onZoomStart) that.options.onZoomStart.call(that);
+				that.zoomed = true;
+			}
 			that.scroller.style.webkitTransform = trnOpen + that.x + 'px,' + that.y + 'px' + trnClose + ' scale(' + scale + ')';
 		}, 0);
 	}
