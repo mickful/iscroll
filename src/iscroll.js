@@ -230,7 +230,7 @@ iScroll.prototype = {
 			scrollerW,
 			scrollerH;
 
-		if (that.moved || that.zoomed || !that.contentReady) return;
+		if (that.moved || that.zooming || !that.contentReady) return;
 
 		scrollerW = m.round(that.scroller.offsetWidth * that.scale),
 		scrollerH = m.round((that.scroller.offsetHeight - that.offsetBottom - that.offsetTop) * that.scale);
@@ -304,7 +304,12 @@ iScroll.prototype = {
 
 		e.preventDefault();
 
-		if (hasTouch && e.touches.length == 2 && that.options.zoom && hasGesture && !that.zoomed) {
+		// TEMP aseemk: taking out the check for !that.zoomed (or !that.zooming), since touchstart
+		// can fire both before *or* after gesturestart! (if both fingers touch at the same time,
+		// it fires *before* gesturestart, but if one finger touches after another, it's *after*.)
+		// also, this has the added benefit of updating the zoom origin if you do a zoom, lift only
+		// one finger, pan, and start another zoom. (previously, this used to use the old origin.)
+		if (hasTouch && e.touches.length == 2 && that.options.zoom && hasGesture) {
 			that.originX = m.abs(e.touches[0].pageX + e.touches[1].pageX - that.wrapperOffsetLeft*2) / 2 - that.x;
 			that.originY = m.abs(e.touches[0].pageY + e.touches[1].pageY - that.wrapperOffsetTop*2) / 2 - that.y;
 		}
@@ -317,6 +322,12 @@ iScroll.prototype = {
 		that.dirX = 0;
 		that.dirY = 0;
 		that.returnTime = 0;
+		
+		// TEMP aseemk: keep track of whether this session ever involved more than one finger.
+		// this works because the very first touchstart will always reset this to false if it has
+		// only one finger, whereas it will set it to true if it has more than one finger, and all
+		// subsequent touchstarts will always set it to true.
+		that.multitouch = hasTouch && e.touches.length > 1;
 		
 		that._transitionTime(0);
 		
@@ -343,8 +354,16 @@ iScroll.prototype = {
 		}
 
 		that.scroller.style.webkitTransitionTimingFunction = 'cubic-bezier(0.33,0.66,0.66,1)';
-		if (that.hScrollbar) that.hScrollbarIndicator.style.webkitTransitionTimingFunction = 'cubic-bezier(0.33,0.66,0.66,1)';
-		if (that.vScrollbar) that.vScrollbarIndicator.style.webkitTransitionTimingFunction = 'cubic-bezier(0.33,0.66,0.66,1)';
+
+		// TEMP HACK try-catching this to prevent errors from propagating up
+		try {
+			if (that.hScrollbar) that.hScrollbarIndicator.style.webkitTransitionTimingFunction = 'cubic-bezier(0.33,0.66,0.66,1)';
+			// TODO BUG the following line throws an error sometimes because vScrollbarIndicator is null:
+			if (that.vScrollbar) that.vScrollbarIndicator.style.webkitTransitionTimingFunction = 'cubic-bezier(0.33,0.66,0.66,1)';
+		} catch (e) {
+			console.warn(e);
+		}
+		
 		that.startX = that.x;
 		that.startY = that.y;
 		that.pointX = point.pageX;
@@ -441,7 +460,13 @@ iScroll.prototype = {
 	},
 	
 	_end: function (e) {
-		if (hasTouch && e.touches.length != 0) return;
+		// TEMP aseemk: if this isn't the final touchend in a multi-touch gesture, update the saved
+		// finger's position. this makes it robust to the finger changing before and after zoom.
+		if (hasTouch && e.touches.length != 0) {
+			this.pointX = e.touches[0].pageX;
+			this.pointY = e.touches[0].pageY;
+			return;
+		}
 
 		var that = this,
 			point = hasTouch ? e.changedTouches[0] : e,
@@ -458,17 +483,7 @@ iScroll.prototype = {
 		that._unbind(END_EV);
 		that._unbind(CANCEL_EV);
 
-		// TEMP aseemk: if we zoomed at all, call the onZoomEnd callback here and return right away.
-		// we lose momentum if you ended with a single-finger drag, but we need to do that right now
-		// because the momentum implementation currently causes the image to fly off in these cases.
-		// TODO we should eventually improve momentum so that it takes a running average instead.
-		if (that.zoomed) {
-			if (that.options.onZoomEnd) that.options.onZoomEnd.call(that);			// Execute custom code on zoom end
-			that.zoomed = false;
-			return;
-		}
-
-		if (!that.moved) {
+		if (!that.moved && !that.multitouch) {
 			if (hasTouch) {
 				if (that.doubleTapTimer && that.options.zoom) {
 					// Double tapped
@@ -572,7 +587,13 @@ iScroll.prototype = {
 			return;
 		}
 
-		that._resetPos();
+		// TEMP aseemk: calling refresh -- which calls _resetPos -- instead of _resetPos directly,
+		// because refresh updates the boundiares (which _resetPos relies on) based on scale, and
+		// scale can change during zoom. this prevents a timing error where refresh() may not have
+		// been called yet from the timeout set in _gestEnd. BUT i'm not sure if there are other
+		// consequences or any downsides to calling refresh() here. hopefully not!
+		//that._resetPos();
+		that.refresh();
 	},
 	
 	_resetPos: function (time) {
@@ -666,9 +687,9 @@ iScroll.prototype = {
 		// TEMP aseemk: the public zoom() method relies on _transitionEnd to signal the end of the
 		// zoom, so call onZoomEnd here. we moved it out of _resetPos because that can cause timing
 		// errors with actual pinch zoom (if touchend fires after _resetPos).
-		if (that.zoomed) {
+		if (that.zooming) {
+			that.zooming = false;
 			if (that.options.onZoomEnd) that.options.onZoomEnd.call(that);			// Execute custom code on zoom end
-			that.zoomed = false;
 		}
 
 		that._resetPos(that.returnTime);
@@ -684,6 +705,9 @@ iScroll.prototype = {
 	_gestStart: function (e) {
 		var that = this;
 
+		that.zooming = true;
+		if (that.options.onZoomStart) that.options.onZoomStart.call(that);
+
 		that._transitionTime(0);
 		that.lastScale = 1;
 
@@ -697,11 +721,6 @@ iScroll.prototype = {
 		var that = this,
 			scale = that.scale * e.scale,
 			x, y, relScale;
-
-		if (!that.zoomed) {
-			if (that.options.onZoomStart) that.options.onZoomStart.call(that);
-			that.zoomed = true;
-		}
 
 		// don't clamp zoom *during* a pinch. to clamp, uncomment this:
 		//if (scale < that.options.zoomMin) scale = that.options.zoomMin;
@@ -727,6 +746,15 @@ iScroll.prototype = {
 		that.y = that.originY - that.originY * lastScale + that.y;
 		that._transitionTime(200);
 		that.scroller.style.webkitTransform = trnOpen + that.x + 'px,' + that.y + 'px' + trnClose + ' scale(' + that.scale + ')';
+
+		that.zooming = false;
+		if (that.options.onZoomEnd) that.options.onZoomEnd.call(that);
+		
+		// TEMP aseemk: on zoom end, reset the "start" state for panning. this leads to much more
+		// robust flicks after zooming and fixes bugs where the content would fly off to a side.
+		that.startX = that.x;
+		that.startY = that.y;
+		that.startTime = e.timeStamp;
 
 		setTimeout(function () {
 			that.refresh();
@@ -1074,7 +1102,7 @@ iScroll.prototype = {
 		var that = this,
 			relScale = scale / that.scale;
 
-		// TEMP aseemk: hort-circuit if this won't do anything. also prevents extraneous onZoomStart.
+		// TEMP aseemk: short-circuit if this won't do anything. also prevents extraneous onZoomStart.
 		if (scale === that.scale) return;
 
 		x = x - that.wrapperOffsetLeft - that.x;
@@ -1083,9 +1111,9 @@ iScroll.prototype = {
 		that.y = y - y * relScale + that.y;
 
 		// TEMP aseemk: calling onZoomStart before we update that.scale to the final scale!
-		if (!that.zoomed) {
+		if (!that.zooming) {
+			that.zooming = true;
 			if (that.options.onZoomStart) that.options.onZoomStart.call(that);
-			that.zoomed = true;
 		}
 		
 		that.scale = scale;
